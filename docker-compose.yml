@@ -1,0 +1,241 @@
+version: '3.8'
+
+services:
+  # Main CyberToolkit Application
+  cybertoolkit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cybertoolkit-app
+    ports:
+      - "3000:3000"    # Web dashboard
+      - "8000:8000"    # CLI API (optional)
+    environment:
+      - NODE_ENV=production
+      - WEB_PORT=3000
+      - MONGODB_URI=mongodb://mongo:27017/cybertoolkit
+      - REDIS_URI=redis://redis:6379
+      - CYBER_TOOLKIT_LOG_LEVEL=INFO
+    volumes:
+      - ./reports:/app/reports
+      - ./logs:/app/logs
+      - ./ml:/app/ml
+    depends_on:
+      - mongo
+      - redis
+    networks:
+      - cybertoolkit-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # MongoDB for scan history and reports
+  mongo:
+    image: mongo:7.0
+    container_name: cybertoolkit-mongo
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=cybertoolkit
+      - MONGO_INITDB_ROOT_PASSWORD=secure_password_change_me
+      - MONGO_INITDB_DATABASE=cybertoolkit
+    volumes:
+      - mongo_data:/data/db
+      - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - cybertoolkit-network
+    restart: unless-stopped
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/cybertoolkit --quiet
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Redis for caching and real-time data
+  redis:
+    image: redis:7.2-alpine
+    container_name: cybertoolkit-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass secure_redis_password_change_me
+    volumes:
+      - redis_data:/data
+    networks:
+      - cybertoolkit-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx reverse proxy (optional)
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: cybertoolkit-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/ssl:/etc/nginx/ssl:ro
+      - ./web/public:/usr/share/nginx/html:ro
+    depends_on:
+      - cybertoolkit
+    networks:
+      - cybertoolkit-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Grafana for advanced monitoring (optional)
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: cybertoolkit-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin_password_change_me
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SECURITY_DISABLE_GRAVATAR=true
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./docker/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - cybertoolkit-network
+    restart: unless-stopped
+    depends_on:
+      - mongo
+
+  # Prometheus for metrics collection (optional)
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: cybertoolkit-prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - cybertoolkit-network
+    restart: unless-stopped
+
+  # ELK Stack for log analysis (optional)
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: cybertoolkit-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - cybertoolkit-network
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: cybertoolkit-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    networks:
+      - cybertoolkit-network
+    restart: unless-stopped
+
+  # Security scanner containers
+  nmap:
+    image: instrumentisto/nmap:latest
+    container_name: cybertoolkit-nmap
+    network_mode: host
+    volumes:
+      - ./reports:/reports
+    restart: "no"
+    profiles:
+      - tools
+
+  nikto:
+    image: frapsoft/nikto:latest
+    container_name: cybertoolkit-nikto
+    volumes:
+      - ./reports:/reports
+    restart: "no"
+    profiles:
+      - tools
+
+# Named volumes for persistent data
+volumes:
+  mongo_data:
+    driver: local
+  redis_data:
+    driver: local
+  grafana_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  elasticsearch_data:
+    driver: local
+
+# Custom network for service communication
+networks:
+  cybertoolkit-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# Development override
+# Use: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+---
+# docker-compose.dev.yml (development overrides)
+version: '3.8'
+
+services:
+  cybertoolkit:
+    build:
+      target: development
+    environment:
+      - NODE_ENV=development
+      - CYBER_TOOLKIT_LOG_LEVEL=DEBUG
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/venv
+    command: npm run dev
+    ports:
+      - "3000:3000"
+      - "9229:9229"  # Node.js debugger
+
+  # Development database with sample data
+  mongo:
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=dev
+      - MONGO_INITDB_ROOT_PASSWORD=dev
+    ports:
+      - "27017:27017"
+
+  redis:
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
